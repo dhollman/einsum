@@ -79,7 +79,7 @@ class TensorInterfaceBase(object):
     def contract_into(self, alpha, a, a_indices, b, b_indices, beta, c_indices):
         """
         Perform the Einstein summation contraction
-            beta * self[c_indices] += alpha * a[a_indices] * b[b_indices]
+            self[c_indices] = alpha * a[a_indices] * b[b_indices] + beta * self[c_indices]
         Returns `None`.  The contraction should actually be carried out at the time
         of the call, or at least securely wrapped in an underlying future managed
         by the implementation.
@@ -104,9 +104,19 @@ class TensorInterfaceBase(object):
     def add_into(self, alpha, a, beta):
         """
         Performs the Einstein summation expression
-            beta * self[...] += alpha * a[...]
+            self[...] = alpha * a[...] + beta * self[...]
         where "..." must be the same for `a` and `self`.  The implementation may
-        assume that `self` and `a` have exactly the same shape.
+        assume that `self` and `a` have exactly the same shape *or* that `a` is
+        exactly the integer 1 (i.e. `a is 1` returns True; note that `1.0` is
+        not the same in this case), in which case the method is expected to add the
+        constant alpha to all elements in `a` after scaling `self` by `beta`.
+        Note that `a` can be the same as `self` (or a trivial view of `self`),
+        and thus the following edge cases, for instance, should be handled with
+        care:
+
+        * t.add_into(1.0, t, 2.0)
+        * t.add_into(1.0, t, 0.0)
+        * t.add_into(1.0, t.subtensor_view(*[slice(i) for i in t.shape]), 0.0)
         """
         return NotImplemented
 
@@ -148,6 +158,73 @@ class TensorInterfaceBase(object):
         Should return a value that is the same type as the elements in `self`
         """
         return NotImplemented
+
+
+
+    #endregion }}}1
+
+    #--------------------------------------------------------------------------------#
+
+    #region | Methods                                                                   {{{1 |
+
+    # Note:  These methods include default implementations that call one or more
+    #  of the required abstract methods above.  In some cases, there may be
+    #  a more efficient way to do what these methods are doing in a given interface,
+    #  in which case the interface should overload said method.
+
+    def scale(self, alpha):
+        """
+        Scale the underlying tensor by the factor `alpha`.  This will almost
+        always be more efficiently done by the interface in an overloaded version,
+        but it can be done with what we have if not.  The default implementation
+        calls `add_into()`.
+        """
+        self.add_into(alpha, self, 0.0)
+
+    def copy_into(self, other):
+        """
+        Copies `other` into `self`.  The interface may assume that `other` and `self`
+        have exactly the same shape.  Default implementation uses `add_into()` with
+        a `beta` parameter of 0.
+        """
+        self.add_into(1.0, other, 0.0)
+
+    def shares_data_with(self, other):
+        """
+        Return `True` if `self` is a view of `other` or `other` is a view of `self`.
+        This is needed for expressions like
+            T["i,j,k"] = T["k,i,j"] + T["j,k,i"]
+        in which case an extra temporary needs to be allocated for the right-hand side.
+        However, most of the time you don't want to allocate such a temporary; if data
+        on the right hand side doesn't depend on the left hand side, the in-place solution
+        is superior.
+        At the cost of efficiency, an interface can simply return `True` for this method always,
+        as the default implementation does, and copies will be made every time.  In other
+        words, no part of the library depends on tensors that do not share data always
+        returning `False` from this method.  When tensors do share data, however,
+        undefined behavior may result from returning `False`.
+        """
+        return True
+
+    #endregion }}}1
+
+    #--------------------------------------------------------------------------------#
+
+    #region | Special Methods                                                           {{{1 |
+
+    def __getitem__(self, item):
+        """
+        Particularly useful for testing; in general should not be used or overloaded
+        by the interface.  Just calls `self.get_element()`
+        """
+        return self.get_element(item)
+
+    def __setitem__(self, key, value):
+        """
+        Particularly useful for testing; in general should not be used or overloaded
+        by the interface.  Just calls `self.set_element()`
+        """
+        return self.set_element(key, value)
 
     #endregion }}}1
 

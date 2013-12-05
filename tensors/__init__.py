@@ -4,10 +4,12 @@ from __future__ import print_function, division
 __all__ = [
     "MathWarning",
     "EinsteinSummationWarning",
+    "Tensor",
 ]
 
 __submodules__ = [
-    "abstract"
+    "abstract",
+    "tensor",
 ]
 
 __all__ += __submodules__
@@ -52,3 +54,6 @@ class EinsteinSummationAlignmentError(EinsteinSummationError):
 
 type_checking_enabled = False
 sanity_checking_enabled = False
+
+# Symbols to explicitly move up into the package namespace
+from tensor import Tensor

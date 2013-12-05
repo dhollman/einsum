@@ -42,14 +42,20 @@ class IndexRangeSet(object):
     the current set.
     """
 
+    name = None
+    """
+    An optional identifier, used for consistency checking in begin and end context calls
+    """
+
     #endregion }}}1
 
     #--------------------------------------------------------------------------------#
 
     #region | Initialization                                                            {{{1 |
 
-    def __init__(self):
+    def __init__(self, name=None):
         self.known_ranges = dict()
+        self.name = name
 
     #endregion }}}1
 
@@ -151,6 +157,9 @@ class IndexRange(object):
     Suspended indexing contexts to be reactivated when current context ends.
     """
 
+    _named_range_sets = dict()
+    _range_set_names = dict()
+
     #endregion }}}1
 
     #--------------------------------------------------------------------------------#
@@ -165,24 +174,67 @@ class IndexRange(object):
     reset_ranges = clear_known_ranges
 
     @classmethod
-    def set_global_index_range_set(cls, new_global_set):
+    def set_global_index_range_set(cls, new_global_set_or_name, name_in=None):
+        #----------------------------------------#
+        if isinstance(new_global_set_or_name, IndexRangeSet):
+            new_global_set = new_global_set_or_name
+            if name_in is not None:
+                new_global_set.name = name_in
+            else:
+                name_in = new_global_set.name
+        #----------------------------------------#
+        else:
+            if name_in is not None:
+                raise TypeError("first parameter of two-parameter form must be an IndexRangeSet")
+            name_in = str(new_global_set_or_name)
+            if name_in in cls._named_range_sets:
+                raise EinsteinSummationIndexingError(
+                    "IndexRangeSet named '{}' already exists".format(name_in)
+                )
+            new_global_set = IndexRangeSet(name=name_in)
+        if name_in is not None:
+            cls._named_range_sets[name_in] = new_global_set
+        #----------------------------------------#
         cls._global_index_context_stack.append(cls.global_index_range_set)
         cls.global_index_range_set = new_global_set
-        # Aliases illustrating the new way to think about IndexRangeSets as a transparent context
+        #----------------------------------------#
+    # Aliases illustrating the better way to think about IndexRangeSets as a transparent context
     set_indexing_context = set_global_index_range_set
     begin_indexing_context = set_global_index_range_set
 
     @classmethod
-    def unset_global_index_range_set(cls, context_to_end=None):
+    def unset_global_index_range_set(cls, context_to_end_or_name=None):
         # check to make sure there's a context to take it's place
         if len(cls._global_index_context_stack) == 0:
             raise ValueError("No indexing context to end.")
-            # Allow the user to give a context as a safety check
+        #----------------------------------------#
+        # Allow the user to give a context as a safety check
+        context_to_end = context_to_end_or_name
+        if context_to_end_or_name is not None and not isinstance(context_to_end_or_name, IndexRangeSet):
+            name = str(context_to_end_or_name)
+            if name not in cls._named_range_sets:
+                raise EinsteinSummationIndexingError(
+                    "unknown range named '{}' can't be ended".format(name)
+                )
+            context_to_end = cls._named_range_sets[name]
         if context_to_end is not None and cls.global_index_range_set is not context_to_end:
-            raise ValueError("Requested context to end is not the current indexing context."
-                             "  Perhaps you forgot to end another context created inside of this one?")
+            name_end = context_to_end.name
+            if name_end is None: name_end = "(unnamed context)"
+            name_active = cls.global_index_range_set.name
+            if name_active is None: name_active = "(unnamed context)"
+            #- - - - - - - - - - - - - - - - - - - - #
+            raise EinsteinSummationIndexingError(
+                "requested end of indexing context '{}', but currently active"
+                " context is '{}'{}".format(
+                    name_end, name_active,
+                    " (which does not refer to the same context)" if name_end == name_active else ""
+                )
+            )
+        if context_to_end is not None and context_to_end.name is not None:
+            cls._named_range_sets.pop(context_to_end.name)
+        #----------------------------------------#
         cls.global_index_range_set = cls._global_index_context_stack.pop()
-        # Alias illustrating the new way to think about IndexRangeSets as a transparent context
+    # Alias illustrating the better way to think about IndexRangeSets as a transparent context
     end_indexing_context = unset_global_index_range_set
 
     #endregion }}}1
@@ -327,7 +379,7 @@ class IndexRange(object):
                 "no definite out-of-context end_index for negative slice component"
             )
         else:
-            return self._slice.start
+            return self._slice.stop
 
     @end_index.setter
     def end_index(self, idx):
@@ -430,14 +482,18 @@ class IndexRange(object):
         """
         if isinstance(subrange, IndexRange):
             if not subrange._begin_is_ellipsis and subrange.begin_index < self.begin_index:
-                raise IndexError("Subrange falls outside of parent range:  Subrange start ("
-                                 + str(subrange.begin_index) + ") is before parent range start ("
-                                 + str(self.begin_index) + ")"
+                raise EinsteinSummationIndexingError(
+                    "Subrange falls outside of parent range:  Subrange start ("
+                         + str(subrange.begin_index) + ") is before parent range start ("
+                         + str(self.begin_index) + ")"
                 )
             elif not subrange._end_is_ellipsis and subrange.end_index > self.end_index:
-                raise IndexError("Subrange falls outside of parent range:  Subrange end ("
-                                 + str(subrange.begin_index) + ") is after parent end ("
-                                 + str(self.begin_index) + ")"
+                raise EinsteinSummationIndexingError(
+                    "Subrange falls outside of parent range:  End of subrange"
+                    " {} (end_index = {}) is after end of parent {} (end_index = {})".format(
+                        str(subrange), subrange.end_index,
+                        str(self), self.end_index
+                    )
                 )
             else:
                 self.subranges.append(subrange)
@@ -493,8 +549,17 @@ class IndexRange(object):
         slice(2, 4, None)
 
         """
+        if type_checking_enabled:
+            if not isinstance(parent_range, IndexRange):
+                raise TypeError("invalid argument type '{}'".format(type(parent_range).__name__))
+        if sanity_checking_enabled:
+            if not is_subrange(self, parent_range):
+                raise EinsteinSummationIndexingError("range '{}' is not a subrange of '{}'".format(
+                    self, parent_range
+                ))
+        #----------------------------------------#
         if parent_range is self:
-            return slice(None)
+            return slice(0, self.size)
         else:
             start = self.begin_index - parent_range.begin_index
             return slice(start, start + self.size)

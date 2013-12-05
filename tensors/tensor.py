@@ -3,7 +3,7 @@
 Tensor front end
 """
 from __future__ import division, print_function
-from tensors import EinsteinSummationIndexingError, EinsteinSummationAlignmentError
+from tensors import EinsteinSummationIndexingError, EinsteinSummationAlignmentError, type_checking_enabled
 from tensors.indices import split_indices, IndexRange
 
 
@@ -16,10 +16,29 @@ class Tensor(object):
 
     #region | Class Attributes                                                          {{{1 |
 
-    interface = None
+    default_interface = None
     """
     The name of the TensorImplementationBase subclass that this class should use by default.
     """
+
+    #--------------------------------------------------------------------------------#
+
+    #region | Class Methods                                                             {{{1 |
+
+    @classmethod
+    def set_interface(cls, interface_class):
+        """
+        Set the default TensorInterfaceBase subclass to wrap
+        """
+        if type_checking_enabled:
+            if not isinstance(interface_class, type):
+                raise TypeError("new interface must be a class, not an instance")
+            if not issubclass(interface_class, TensorInterfaceBase):
+                raise TypeError("new interface must be a subclass of TensorInterfaceBase")
+        #----------------------------------------#
+        cls.default_interface = interface_class
+
+    #endregion }}}1
 
     #--------------------------------------------------------------------------------#
 
@@ -42,8 +61,8 @@ class Tensor(object):
         self.ranges = tuple(self.index_range_set[i] for i in self.indices)
         #----------------------------------------#
         if interface is None:
-            interface = type(self).interface
-        self._interface = interface
+            interface = type(self).default_interface
+        self.interface = interface
         #----------------------------------------#
         if _impl is not None:
             self._impl = _impl
@@ -54,11 +73,16 @@ class Tensor(object):
                     shape.append(size)
                 except EinsteinSummationIndexingError:
                     shape.append(None)
+            shape = tuple(shape)
             if len(shape) != len(_impl.shape):
-                raise EinsteinSummationAlignmentError("shape mismatch")
+                raise EinsteinSummationAlignmentError(
+                    "shape mismatch: {} != {}".format(shape, _impl.shape)
+                )
             for my_size, expected in zip(shape, _impl.shape):
                 if my_size is not None and my_size != expected:
-                    raise EinsteinSummationAlignmentError("shape mismatch")
+                    raise EinsteinSummationAlignmentError(
+                        "shape mismatch: {} incompatible with {}".format(shape, _impl.shape)
+                    )
         #- - - - - - - - - - - - - - - - - - - - #
         else:
             shape = tuple(r.size for r in self.ranges)
@@ -87,12 +111,23 @@ class Tensor(object):
         elif isinstance(value, EinsumSum):
             value.sum_into(lhs)
         elif isinstance(value, EinsumTensor):
-            value.sort_into(lhs)
+            value.sort_to(lhs)
 
 
+    #--------------------------------------------------------------------------------#
 
+    #region | Properties                                                                {{{1 |
 
+    @property
+    def shape(self):
+        return self._impl.shape
+
+    #endregion }}}1
+
+    #--------------------------------------------------------------------------------#
 
     pass
+    # end class Tensor
 
 from einsum import EinsumTensor, EinsumContraction, EinsumSum
+from abstract import TensorInterfaceBase

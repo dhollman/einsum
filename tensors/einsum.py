@@ -4,7 +4,7 @@ Wrapper classes that are returned by Tensor.__getitem__(), etc.
 """
 from __future__ import print_function, division
 from operator import mul
-from tensors import sanity_checking_enabled, EinsteinSummationAlignmentError
+from tensors import sanity_checking_enabled, EinsteinSummationAlignmentError, EinsteinSummationIndexingError
 from tensors.indices import split_indices, IndexRange
 from copy import copy
 import string
@@ -58,14 +58,17 @@ class EinsumTensor(object):
         self.indices = split_indices(indices)
         self._tensor = tensor
         self.ranges = []
+        self._sliced_tensor = None
         #----------------------------------------#
         if known_indices:
             self.known_indices = known_indices
             if index_range_set is None:
                 index_range_set = IndexRange.global_index_range_set
-            for idx in indices:
+            for idx in self.indices:
                 if idx in index_range_set:
                     self.ranges.append(index_range_set[idx])
+                else:
+                    raise EinsteinSummationIndexingError("unknown index '{}'".format(idx))
             self.ranges = tuple(self.ranges)
         else:
             raise NotImplementedError("EinsumTensor objects without declared"
@@ -91,12 +94,21 @@ class EinsumTensor(object):
 
     @property
     def sliced_tensor(self):
-        return Tensor(
-            self.indices,
-            index_range_set=self.index_range_set,
-            _impl=self._tensor._impl.subtensor_view(*self.slices_in_parent),
-            interface=self._tensor._interface()
-        )
+        if self._sliced_tensor is None:
+            self._sliced_tensor = Tensor(
+                self.indices,
+                index_range_set=self._tensor.index_range_set,
+                _impl=self._tensor._impl.subtensor_view(*self.slices_in_parent),
+                interface=self._tensor.interface
+            )
+        return self._sliced_tensor
+
+    @property
+    def _(self):
+        """
+        Convenient alias for the `sliced_tensor` property
+        """
+        return self.sliced_tensor
 
     @property
     def slices(self):
@@ -122,7 +134,7 @@ class EinsumTensor(object):
             indices=self.indices,
             tensor=self._tensor,
             coeff=self.coeff,
-            index_range_set=self.index_range_set,
+            index_range_set=self._tensor.index_range_set,
             known_indices=self.known_indices
         )
 
@@ -163,6 +175,8 @@ class EinsumTensor(object):
         elif isinstance(other, EinsumSum):
             other.summands.append(self)
             return other
+        elif isinstance(other, Real):
+            return NotImplemented
         else: # pragma: no cover
             return NotImplemented
 
@@ -182,20 +196,20 @@ class EinsumTensor(object):
 
     #region | Methods                                                                   {{{1 |
 
-    def sort_into(self, other):
+    def sort_to(self, other):
         """
         sort this and store the result in other; e.g.
             other['pqrs'] = self['qrsp']
         """
         new_axes = []
-        for idx in self.indices:
-            if idx not in other.indices:
+        for idx in other.indices:
+            if idx not in self.indices:
                 raise EinsteinSummationAlignmentError("mismatched lhs/rhs"
                                                       " indices: ({}) != ({})".format(
                     ", ".join(self.indices),
                     ", ".join(other.indices)
                 ))
-            new_axes.append(other.indices.index(idx))
+            new_axes.append(self.indices.index(idx))
         other.sliced_tensor._impl.sort_into(self.sliced_tensor._impl, new_axes)
 
     #--------------------------------------------------------------------------------#
@@ -307,7 +321,7 @@ class EinsumContraction(object):
 
     def __rmul__(self, other):
         if isinstance(other, Real):
-            return self * other
+            return self.__mul__(other)
         else: # pragma: no cover
             return NotImplemented
 
@@ -354,7 +368,7 @@ class EinsumContraction(object):
             dot_product = False
         #========================================#
         prefactor = reduce(mul, [t.coeff for t in self.tensors] , 1.0)
-        interface = dest.interface
+        interface = dest._tensor.interface
         #----------------------------------------#
         # TODO (semi-)automatic factorization of dot products
         if dot_product:
@@ -379,12 +393,12 @@ class EinsumContraction(object):
                 idxmap[i] = _index_set[n]
             dest.sliced_tensor._impl.contract_into(
                 prefactor,
-                self.tensors[0].sliced_tensor,
-                tuple(idxmap[i] for i in self.tensors[0].indices),
-                self.tensors[1].sliced_tensor,
-                tuple(idxmap[i] for i in self.tensors[1].indices),
-                1.0,
-                tuple(idxmap[i] for i in dest.indices)
+                self.tensors[0].sliced_tensor._impl,
+                "".join(idxmap[i] for i in self.tensors[0].indices),
+                self.tensors[1].sliced_tensor._impl,
+                "".join(idxmap[i] for i in self.tensors[1].indices),
+                0.0,
+                "".join(idxmap[i] for i in dest.indices)
             )
             return dest.sliced_tensor
         #----------------------------------------#
@@ -409,9 +423,14 @@ class EinsumContraction(object):
                     out_shape = []
                     for idx in out_idxs:
                         if idx in left.indices:
-                            out_shape.append(left.shape[left.indices.index(idx)])
+                            out_shape.append(
+                                left.sliced_tensor.shape[left.indices.index(idx)]
+                            )
                         else:
-                            out_shape.append(right.shape[right.indices.index(idx)])
+                            out_shape.append(
+                                right.sliced_tensor.shape[right.indices.index(idx)]
+                            )
+                    out_shape = tuple(out_shape)
                     # The new left tensor will be the contraction intermediate
                     old_ltmp = ltmp
                     ltmp = interface.create_tensor(out_shape)
@@ -527,9 +546,41 @@ class EinsumSum(object):
     #region | Methods                                                                   {{{1 |
 
     def sum_into(self, dest, accumulate=False):
-        # TODO Check if dest is anywhere on the right hand side and copy if necessary
-        #----------------------------------------#
         dst_slice = dest.sliced_tensor
+        #----------------------------------------#
+        # check if `dest` shares data with a contributing factor to more than one term.
+        #   If so, we need to create a temporary to store the rhs result.
+        shared = []
+        tmp_dst_impl = None
+        interface = dst_slice.interface
+        for term in self.summands:
+            if isinstance(term, EinsumTensor):
+                shared.append(term.sliced_tensor._impl.shares_data_with(dst_slice._impl))
+            else: # isinstance(term, EinsumContraction)
+                shared.append(
+                    any(
+                        t.sliced_tensor._impl.shares_data_with(dst_slice._impl)
+                            for t in term.tensors
+                    )
+                )
+        if sum(shared) > 1:
+            tmp_dst_impl = interface.create_tensor(dst_slice.shape)
+            new_dst_tens = EinsumTensor(
+                indices=dst_slice.indices,
+                tensor=Tensor(
+                    indices=dst_slice.indices,
+                    index_range_set=dest._tensor.index_range_set,
+                    _impl=tmp_dst_impl,
+                    interface=interface
+                ),
+                coeff=1.0,
+                index_range_set=dest._tensor.index_range_set,
+                known_indices=True
+            )
+            if accumulate:
+                new_dst_tens.sliced_tensor._impl.copy_into(dst_slice._impl)
+            dst_slice = new_dst_tens.sliced_tensor
+        #----------------------------------------#
         for term in self.summands:
             #----------------------------------------#
             # add contraction term
@@ -541,12 +592,12 @@ class EinsumSum(object):
                         ", ".join(term.external_indices),
                     ))
                 #- - - - - - - - - - - - - - - - - - - - #
-                idx_range_set = dest.index_range_set
-                interface = dest.interface
+                idx_range_set = dst_slice.index_range_set
+                interface = dst_slice.interface
                 # This is more complicated that it needs to be since we don't
                 #   have broadcasting
                 out_idxs = sorted(term.external_indices, key=dest.indices.index)
-                out_shape = tuple(idx_range_set[i] for i in out_idxs)
+                out_shape = tuple(idx_range_set[i].size for i in out_idxs)
                 impl_tmp = interface.create_tensor(out_shape)
                 contr_tmp = EinsumTensor(
                     indices=out_idxs,
@@ -561,7 +612,8 @@ class EinsumSum(object):
                     known_indices=True
                 )
                 term.contract(contr_tmp)
-                dst_slice._impl.add_into(1.0, contr_tmp._impl,
+                # Coefficient gets incorporated in the contraction
+                dst_slice._impl.add_into(1.0, contr_tmp._tensor._impl,
                     1.0 if accumulate or term is not self.summands[0] else 0.0
                 )
                 interface.release_tensor(impl_tmp)
@@ -575,10 +627,39 @@ class EinsumSum(object):
                         ", ".join(term.indices),
                     ))
                 #- - - - - - - - - - - - - - - - - - - - #
-                dst_slice._impl.add_into(1.0, term.sliced_tensor._impl,
+                tmp_used = False
+                srt_tmp_impl = None
+                srt_tmp = term
+                interface = dst_slice.interface
+                if dest.indices != term.indices:
+                    # need to sort into a temporary
+                    tmp_used = True
+                    idx_range_set = dst_slice.index_range_set
+                    out_shape = tuple(idx_range_set[i].size for i in dest.indices)
+                    srt_tmp_impl = interface.create_tensor(out_shape)
+                    srt_tmp = EinsumTensor(
+                        indices=dest.indices,
+                        tensor=Tensor(
+                            indices=dest.indices,
+                            index_range_set=dest._tensor.index_range_set,
+                            _impl=srt_tmp_impl,
+                            interface=interface
+                        ),
+                        coeff=1.0,
+                        index_range_set=dest._tensor.index_range_set,
+                        known_indices=True
+                    )
+                    term.sort_to(srt_tmp)
+                dst_slice._impl.add_into(term.coeff, srt_tmp.sliced_tensor._impl,
                     1.0 if accumulate or term is not self.summands[0] else 0.0
                 )
-            #----------------------------------------#
+                if tmp_used:
+                    interface.release_tensor(srt_tmp_impl)
+        #----------------------------------------#
+        if tmp_dst_impl is not None:
+            dest.sliced_tensor._impl.copy_into(dst_slice._impl)
+            interface.release_tensor(tmp_dst_impl)
+        #----------------------------------------#
         return dst_slice
 
 
