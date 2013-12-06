@@ -363,8 +363,6 @@ class TestNumPyInterface(TestCase):
         for p,q,r in self.indices_iterator("p,q,r"):
             E[p,q,r] = T1[p,r,q] + T1[p,q,r]
         #----------------------------------------#
-        print(E._array)
-        print("#"*30)
         print(T1._array)
         self.assertTensorEqual(result, expect)
 
