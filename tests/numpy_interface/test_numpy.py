@@ -539,3 +539,20 @@ class TestNumPyInterface(TestCase):
         self.assertTensorEqual(result, expect)
 
     #--------------------------------------------------------------------------------#
+
+    def test_dot_1(self):
+        t1 = self.make_range_tensor("p,q,r,s")
+        t2 = self.make_range_tensor("p,q,r,s", offset=3.0)
+        expect = 0
+        #----------------------------------------#
+        # Einstein summation version
+        result = t1["p,q,r,s"] * t2["s,q,p,r"]
+        #----------------------------------------#
+        # The same thing, in terms of get_element()
+        #   and set_element() calls
+        T1, T2 = t1._impl, t2._impl
+        for p,q,r,s in self.indices_iterator("p,q,r,s"):
+            expect += T1[p,q,r,s] * T2[s,q,p,r]
+        #----------------------------------------#
+        self.assertEqual(result, expect)
+

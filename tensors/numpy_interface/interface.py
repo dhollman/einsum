@@ -52,8 +52,8 @@ class NumPyInterface(TensorInterfaceBase):
             raise EinsteinSummationError("released tensor was never allocated")
 
     @classmethod
-    def dot_product(cls, *args):
-        return np.einsum(
+    def dot_product(cls, alpha, *args):
+        return alpha * np.einsum(
             ",".join(args[1::2]),
             *[arg._array for arg in args[::2]]
         )

@@ -368,10 +368,10 @@ class EinsumContraction(object):
             dot_product = False
         #========================================#
         prefactor = reduce(mul, [t.coeff for t in self.tensors] , 1.0)
-        interface = dest._tensor.interface
         #----------------------------------------#
         # TODO (semi-)automatic factorization of dot products
         if dot_product:
+            interface = self.tensors[0]._tensor.interface
             # Create the index map
             indices = list(set(all_idxs))
             idxmap = {}
@@ -387,6 +387,7 @@ class EinsumContraction(object):
         #----------------------------------------#
         elif len(self.tensors) == 2:
             # Create the index map
+            interface = dest._tensor.interface
             indices = list(set(all_idxs))
             idxmap = {}
             for n, i in enumerate(indices):
@@ -409,6 +410,7 @@ class EinsumContraction(object):
             #    file = self.print_factorization if self.print_factorization is not True else sys.stdout
             #    p = lambda x: print(x, file=file)
             #    p("Factorization of contraction {} <= {}".format(str(dest), str(self)))
+            interface = dest._tensor.interface
             left = self.tensors[0]
             left.coeff = prefactor
             ltmp = None

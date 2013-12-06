@@ -42,7 +42,7 @@ class TensorInterfaceBase(object):
         return NotImplemented
 
     @classmethod
-    def dot_product(cls, *args):
+    def dot_product(cls, alpha, *args):
         """
         Return the dot product of the TensorInterfaceBase instances given in args using
         indices given in args.  Arguments are given as tensor1, indices1, tensor2, indices2, etc.
